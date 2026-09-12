@@ -16,12 +16,12 @@ import {
   AB_CROSS_KEY_SEP, AB_MIN_SEGMENT_N, abCrossMatrix, abLeanAlpha, abSegments,
   abTopMovers, isCrossBreakdown, normalizeBreakdowns, pct, signedPp,
 } from "./ab-analysis.js";
-import * as api from "./api.js?v=pa-1";
+import * as api from "./api.js?v=ws-1";
 import { buildEvidenceChartModel } from "./evidence-chart.js";
 import { createPersonaChart, answerLabel } from "./persona-chart.js?v=4";
 import { buildVerifiedDataModel, renderVerifiedData, bindVerifiedData, reduceVerifiedSelection, verifiedMapSelection } from "./verified-data.js";
 import { snapshotAudience, describeAudience, audienceHeader, audienceScope } from "./audience.js";
-import { initFeedPanel, refreshFeedPanel, lineageItems } from "./feedpanel.js?v=9";
+import { initFeedPanel, refreshFeedPanel, lineageItems } from "./feedpanel.js?v=10";
 
 const $ = (id) => document.getElementById(id);
 const els = {

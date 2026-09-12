@@ -18,6 +18,7 @@ use crate::sim::{SimEngine, SimEvent};
 use crate::state::{AgentState, SimState};
 use crate::store::{SimMeta, Store};
 use axum::{
+    http::HeaderMap,
     extract::{Path, Query, State},
     http::StatusCode,
     response::sse::{Event as SseEvent, Sse},
@@ -89,6 +90,7 @@ pub fn router(state: AppState) -> Router {
         .allow_headers(Any);
     Router::new()
         .route("/health", get(health))
+        .route("/workspace", get(workspace_info))
         .route("/", get(root))
         .route("/cities", get(list_cities))
         .route("/cities/:city/parse", post(parse_question_handler))
@@ -126,6 +128,7 @@ pub fn router(state: AppState) -> Router {
 
 async fn data_query_handler(
     State(st): State<AppState>,
+    headers: HeaderMap,
     payload: Result<Json<Value>, axum::extract::rejection::JsonRejection>,
 ) -> Json<Value> {
     let Json(input) = match payload {
@@ -177,6 +180,7 @@ async fn data_query_handler(
     let answered = response.get("status").and_then(|v| v.as_str()) == Some("ok");
     if let (Some(mem), true, false) = (st.memory.clone(), answered && record, city.is_empty()) {
         let snapshot = response.clone();
+        let city = crate::memory::city_key(&workspace_of(&headers), &city);
         tokio::spawn(async move {
             match mem.record_data_query(&city, &question, &snapshot).await {
                 Ok(rec) => tracing::info!("persona memory: recorded data query '{}' ({})", rec.question, rec.id),
@@ -185,6 +189,37 @@ async fn data_query_handler(
         });
     }
     Json(response)
+}
+
+/// Memory workspace of a request: the validated `X-Simtra-Workspace` header, else
+/// `public`. Workspaces scope events, reactions, tests, answers and data queries;
+/// simulations themselves are deterministic and shared.
+fn workspace_of(headers: &HeaderMap) -> String {
+    crate::memory::normalize_workspace(
+        headers
+            .get("x-simtra-workspace")
+            .and_then(|v| v.to_str().ok()),
+    )
+}
+
+/// What the current workspace remembers, for the UI.
+async fn workspace_info(State(st): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    let ws = workspace_of(&headers);
+    let Some(mem) = st.memory.as_ref() else {
+        return Json(json!({"workspace": ws, "memory_configured": false, "events": 0, "tests": 0, "data_queries": 0}))
+            .into_response();
+    };
+    match mem.workspace_summary(&ws).await {
+        Ok((events, tests, data_queries)) => Json(json!({
+            "workspace": ws, "memory_configured": true,
+            "events": events, "tests": tests, "data_queries": data_queries,
+        }))
+        .into_response(),
+        Err(e) => {
+            tracing::warn!("persona memory: workspace summary failed: {e:#}");
+            (StatusCode::BAD_GATEWAY, Json(json!({"error":"persona memory read failed"}))).into_response()
+        }
+    }
 }
 
 async fn root() -> impl IntoResponse {
@@ -357,6 +392,7 @@ fn default_commit() -> u64 {
 
 async fn create_sim(
     State(st): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<CreateSimReq>,
 ) -> impl IntoResponse {
     let n = req.n.clamp(1, 50_000);
@@ -433,12 +469,13 @@ async fn create_sim(
     // Register personas in the memory graph (idempotent, best-effort, off the request path).
     if let Some(mem) = st.memory.clone() {
         let pop_for_mem = pop_arc.clone();
+        let ws = workspace_of(&headers);
         tokio::spawn(async move {
-            match mem.ensure_population(&pop_for_mem).await {
+            match mem.ensure_population(&ws, &pop_for_mem).await {
                 Ok(()) => tracing::info!(
                     "persona memory: registered {} personas for {}",
                     pop_for_mem.agents.len(),
-                    crate::memory::population_key_of(&pop_for_mem)
+                    crate::memory::population_key_in(&ws, &pop_for_mem)
                 ),
                 Err(e) => tracing::warn!("persona memory: population registration failed: {e:#}"),
             }
@@ -850,6 +887,7 @@ async fn branch_chatter(
 
 async fn branch_poll(
     State(st): State<AppState>,
+    headers: HeaderMap,
     Path(bid): Path<String>,
     Json(req): Json<Value>,
 ) -> impl IntoResponse {
@@ -869,7 +907,7 @@ async fn branch_poll(
     };
     match st
         .engine
-        .run_poll_tagged(&ctx.population, &poll, &TestTag::poll().on_branch(&ctx.id, &bid))
+        .run_poll_tagged(&ctx.population, &poll, &TestTag::poll().on_branch(&ctx.id, &bid).in_workspace(&workspace_of(&headers)))
         .await
     {
         Ok(res) => {
@@ -976,6 +1014,7 @@ struct CounterfactualResponse {
 
 async fn branch_counterfactual(
     State(st): State<AppState>,
+    headers: HeaderMap,
     Path(bid): Path<String>,
     Json(req): Json<CounterfactualReq>,
 ) -> impl IntoResponse {
@@ -999,7 +1038,7 @@ async fn branch_counterfactual(
             &ctx.population,
             &poll,
             event,
-            &TestTag::kind("counterfactual").on_branch(&ctx.id, &bid),
+            &TestTag::kind("counterfactual").on_branch(&ctx.id, &bid).in_workspace(&workspace_of(&headers)),
         )
         .await
     {
@@ -1304,6 +1343,7 @@ fn map_ab_result(result: PollResult, profile: &CityProfile) -> AbTestResponse {
 
 async fn branch_ab_test(
     State(st): State<AppState>,
+    headers: HeaderMap,
     Path(bid): Path<String>,
     Json(req): Json<AbTestReq>,
 ) -> impl IntoResponse {
@@ -1333,7 +1373,7 @@ async fn branch_ab_test(
             &req.as_of_date,
             model,
             population,
-            &TestTag::kind("ab_test").on_branch(&ctx.id, &bid),
+            &TestTag::kind("ab_test").on_branch(&ctx.id, &bid).in_workspace(&workspace_of(&headers)),
         )
         .await
     {
@@ -1348,6 +1388,7 @@ async fn branch_ab_test(
 
 async fn predict_market(
     State(st): State<AppState>,
+    headers: HeaderMap,
     Path(bid): Path<String>,
     Json(req): Json<Value>,
 ) -> impl IntoResponse {
@@ -1405,7 +1446,7 @@ async fn predict_market(
         .run_poll_tagged(
             &ctx.population,
             &poll,
-            &TestTag::kind("predict_market").on_branch(&ctx.id, &bid),
+            &TestTag::kind("predict_market").on_branch(&ctx.id, &bid).in_workspace(&workspace_of(&headers)),
         )
         .await
     {
@@ -1799,6 +1840,7 @@ fn validate_event_request(req: &CreateEventReq) -> Result<(String, String, Strin
 /// Throw an event into a city's world. Every persona in that city remembers it.
 async fn create_city_event(
     State(st): State<AppState>,
+    headers: HeaderMap,
     Path(city): Path<String>,
     Json(req): Json<CreateEventReq>,
 ) -> impl IntoResponse {
@@ -1816,6 +1858,7 @@ async fn create_city_event(
     let Some(mem) = st.memory.as_ref() else {
         return memory_not_configured();
     };
+    let city = crate::memory::city_key(&workspace_of(&headers), &city);
     match mem.add_city_event(&city, &kind, &text, &as_of_date).await {
         Ok(event) => (StatusCode::CREATED, Json(json!({"event": event}))).into_response(),
         Err(e) => {
@@ -1836,6 +1879,7 @@ struct EventListQuery {
 
 async fn list_city_events(
     State(st): State<AppState>,
+    headers: HeaderMap,
     Path(city): Path<String>,
     Query(query): Query<EventListQuery>,
 ) -> impl IntoResponse {
@@ -1850,6 +1894,7 @@ async fn list_city_events(
         return memory_not_configured();
     };
     let limit = query.limit.unwrap_or(25).clamp(1, 100);
+    let city = crate::memory::city_key(&workspace_of(&headers), &city);
     match mem.list_city_events(&city, limit).await {
         Ok(events) => Json(json!({"events": events})).into_response(),
         Err(e) => {
@@ -1868,6 +1913,7 @@ async fn list_city_events(
 /// run of the same question.
 async fn city_lineage(
     State(st): State<AppState>,
+    headers: HeaderMap,
     Path(city): Path<String>,
     Query(query): Query<EventListQuery>,
 ) -> impl IntoResponse {
@@ -1882,6 +1928,7 @@ async fn city_lineage(
         return memory_not_configured();
     };
     let limit = query.limit.unwrap_or(100).clamp(1, 500);
+    let city = crate::memory::city_key(&workspace_of(&headers), &city);
     match mem.lineage(&city, limit).await {
         Ok(items) => Json(json!({"items": items})).into_response(),
         Err(e) => {
@@ -1898,6 +1945,7 @@ async fn city_lineage(
 /// One event with every stored resident reaction, newest first.
 async fn event_reactions(
     State(st): State<AppState>,
+    headers: HeaderMap,
     Path((city, event_id)): Path<(String, String)>,
     Query(query): Query<EventListQuery>,
 ) -> impl IntoResponse {
@@ -1912,6 +1960,7 @@ async fn event_reactions(
         return memory_not_configured();
     };
     let limit = query.limit.unwrap_or(50).clamp(1, 200);
+    let city = crate::memory::city_key(&workspace_of(&headers), &city);
     match mem.event_reactions(&city, &event_id, limit).await {
         Ok(Some((event, reactions))) => {
             let sentiment = crate::memory::sentiment_tally(&reactions);
@@ -1943,6 +1992,7 @@ struct ReactReq {
 /// social feed. Reactions are generated by the model, stored in memory, and returned.
 async fn react_to_event(
     State(st): State<AppState>,
+    headers: HeaderMap,
     Path((bid, event_id)): Path<(String, String)>,
     Json(req): Json<ReactReq>,
 ) -> impl IntoResponse {
@@ -1959,7 +2009,8 @@ async fn react_to_event(
     let Some(mem) = st.memory.as_ref() else {
         return memory_not_configured();
     };
-    let city = ctx.city.profile.slug.clone();
+    let ws = workspace_of(&headers);
+    let city = crate::memory::city_key(&ws, &ctx.city.profile.slug);
     let event = match mem.event_reactions(&city, &event_id, 1).await {
         Ok(Some((event, _))) => event,
         Ok(None) => {
@@ -2011,7 +2062,10 @@ async fn react_to_event(
             })
         })
         .collect();
-    let pop_key = crate::memory::population_key_of(&pop);
+    let pop_key = crate::memory::population_key_in(&ws, &pop);
+    if let Err(e) = mem.ensure_population(&ws, &pop).await {
+        tracing::warn!("persona memory: population registration failed: {e:#}");
+    }
     if let Err(e) = mem.record_reactions(&pop_key, &event_id, &reactions).await {
         tracing::warn!("persona memory: reactions write failed: {e:#}");
     }
@@ -2127,6 +2181,7 @@ struct PersonalAnswersReq {
 /// model call (capped per request) and written to their ANSWERED edge.
 async fn test_personal_answers(
     State(st): State<AppState>,
+    headers: HeaderMap,
     Path(test_id): Path<String>,
     Json(req): Json<PersonalAnswersReq>,
 ) -> impl IntoResponse {
@@ -2152,7 +2207,7 @@ async fn test_personal_answers(
         }
     };
     let (question, description, framing_name, options, as_of_date, population_key) = test;
-    let pop_key = crate::memory::population_key_of(&ctx.population);
+    let pop_key = crate::memory::population_key_in(&workspace_of(&headers), &ctx.population);
     if !population_key.is_empty() && population_key != pop_key {
         return (
             StatusCode::CONFLICT,
@@ -2233,6 +2288,7 @@ async fn test_personal_answers(
 
 async fn agent_memory(
     State(st): State<AppState>,
+    headers: HeaderMap,
     Path((bid, id)): Path<(String, u32)>,
 ) -> impl IntoResponse {
     let (ctx, _bs) = match find_branch(&st, &bid) {
@@ -2255,7 +2311,7 @@ async fn agent_memory(
     let Some(mem) = st.memory.as_ref() else {
         return memory_not_configured();
     };
-    let pop_key = crate::memory::population_key_of(&ctx.population);
+    let pop_key = crate::memory::population_key_in(&workspace_of(&headers), &ctx.population);
     match mem.persona_view(&pop_key, id).await {
         Ok(view) => Json(view).into_response(),
         Err(e) => {

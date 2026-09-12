@@ -455,7 +455,14 @@ p_yes is a probability between 0 and 1. Be realistic and calibrated to {city_nam
         // the poll date — city news, stimuli it was shown, tests it already answered.
         // Appended to the representative's profile so the whole archetype reasons with
         // it. Deterministic ordering keeps prompts (and cache keys) stable.
-        let pop_key = memory::population_key_of(pop);
+        let pop_key = memory::population_key_in(&tag.workspace(), pop);
+        if let Some(mem) = &self.memory {
+            // A fresh workspace may not have its personas yet (registration runs in the
+            // background on simulation create). One cheap query once registered.
+            if let Err(e) = mem.ensure_population(&tag.workspace(), pop).await {
+                tracing::warn!("persona memory: population registration failed: {e:#}");
+            }
+        }
         let memory_by_rep: HashMap<usize, String> = if let Some(mem) = &self.memory {
             let rep_ids: Vec<u32> = clusters.iter().map(|c| pop.agents[c.rep_idx].id).collect();
             match mem.recall(&pop_key, &rep_ids, &poll.as_of_date).await {
@@ -914,7 +921,7 @@ p_yes is a probability between 0 and 1. Be realistic and calibrated to {city_nam
             }
         }
         let pop_key = pop_key.to_string();
-        let city = pop.profile.slug.clone();
+        let city = memory::city_key(&tag.workspace(), &pop.profile.slug);
         let stimulus = poll.event.clone();
         let stimuli = tag.stimuli.clone();
         tokio::spawn(async move {

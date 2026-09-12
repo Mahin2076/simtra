@@ -14,6 +14,7 @@
 // ─────────────────────────────────────────────────────────────────────────
 
 import { BASE, today } from "./config.js";
+import { WORKSPACE, workspaceHeaders, shareUrl, startNewWorkspace } from "./workspace.js?v=1";
 import { detectKind, nextKind } from "./detect-kind.js";
 import { buildEvidenceChartModel } from "./evidence-chart.js";
 import { createPersonaChart } from "./persona-chart.js?v=4";
@@ -44,7 +45,7 @@ async function req(path, { method = "GET", body, timeout = 30000 } = {}) {
   try {
     const res = await fetch(`${BASE}${path}`, {
       method,
-      headers: body ? { "content-type": "application/json" } : undefined,
+      headers: { ...workspaceHeaders(), ...(body ? { "content-type": "application/json" } : {}) },
       body: body ? JSON.stringify(body) : undefined,
       signal: ctrl.signal,
     });
@@ -182,6 +183,18 @@ function build(root) {
         <span class="fp-caret">${ICONS.caret}</span>
       </button>
       <div class="fp-status" aria-live="polite"></div>
+      <div class="fp-workspace">
+        <span class="fp-ws-label">workspace</span>
+        <code class="fp-ws-id" title="Only this browser (and anyone with the link) sees this memory"></code>
+        <button type="button" class="fp-ws-link" data-ws="share">share</button>
+        <span class="fp-ws-sep">·</span>
+        <button type="button" class="fp-ws-link" data-ws="new">new</button>
+      </div>
+      <div class="fp-ws-confirm hidden" role="dialog" aria-label="Start a new workspace">
+        <span>Start a new, empty workspace? The current one stays reachable by its link.</span>
+        <button type="button" class="fp-primary fp-ws-go">New workspace</button>
+        <button type="button" class="fp-ws-link fp-ws-cancel">Cancel</button>
+      </div>
     </div>
     <div id="fp-body" class="fp-body">
       <div class="fp-views" role="tablist" aria-label="Show">
@@ -209,6 +222,8 @@ function build(root) {
     collapse: q(".fp-collapse"),
     city: q(".fp-city"),
     status: q(".fp-status"),
+    wsId: q(".fp-ws-id"),
+    wsConfirm: q(".fp-ws-confirm"),
     body: q("#fp-body"),
     formPost: q(".fp-form-post"),
     kind: q(".fp-kind"),
@@ -295,6 +310,19 @@ export function initFeedPanel({
   });
 
   state.el.formPost.addEventListener("submit", postEvent);
+  state.el.wsId.textContent = WORKSPACE === "public" ? "public (shared)" : WORKSPACE;
+  root.querySelector('[data-ws="share"]').addEventListener("click", async () => {
+    const url = shareUrl();
+    try { await navigator.clipboard.writeText(url); notice("Workspace link copied."); }
+    catch { notice(url); }
+    setTimeout(() => notice(""), 2500);
+  });
+  root.querySelector('[data-ws="new"]').addEventListener("click", () => {
+    state.el.wsConfirm.classList.remove("hidden");
+    state.el.wsConfirm.querySelector(".fp-ws-go").focus();
+  });
+  state.el.wsConfirm.querySelector(".fp-ws-cancel").addEventListener("click", () => state.el.wsConfirm.classList.add("hidden"));
+  state.el.wsConfirm.querySelector(".fp-ws-go").addEventListener("click", () => startNewWorkspace());
   for (const f of [state.el.formPost]) {
     f.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); f.requestSubmit(); }
