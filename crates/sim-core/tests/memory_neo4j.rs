@@ -61,6 +61,8 @@ async fn neo4j_memory_roundtrip() {
     // more than RECALL_EVENTS events share the date (ordering by created_at, not id).
     let mut same_day = Vec::new();
     for i in 0..(memory::RECALL_EVENTS + 2) {
+        // created_at has second resolution: give the last one a distinct timestamp
+        if i == memory::RECALL_EVENTS + 1 { tokio::time::sleep(std::time::Duration::from_millis(1100)).await; }
         let e = mem
             .add_city_event(&city, "news", &format!("Same-day filler event {i} for {seed}"), "2026-09-10")
             .await
@@ -202,6 +204,41 @@ async fn neo4j_memory_roundtrip() {
     assert!(lineage.iter().any(|i| i.id() == record.id), "lineage lists the workspace test");
     let (n_events, n_tests, _) = mem.workspace_summary(&ws).await.unwrap();
     assert!(n_events >= 1 && n_tests >= 1, "workspace summary counts this run");
+
+    // Seeding: a fresh workspace copies this workspace's most recent survey and news
+    // event, re-keyed onto its own personas, and never does it twice.
+    let seeded_ws = format!("seeded-{seed}");
+    let (n_t, n_e) = mem.seed_workspace(&seeded_ws, &ws, &pop, 3).await.unwrap();
+    assert!(n_t >= 1 && n_e >= 1, "seed copies at least one survey and one event, got {n_t}/{n_e}");
+    let seeded_city = memory::city_key(&seeded_ws, "sf");
+    let seeded_pop = memory::population_key_in(&seeded_ws, &pop);
+    let copied_test = memory::seeded_id("test", &record.id, &seeded_ws);
+    let seeded_lineage = mem.lineage(&seeded_city, 100).await.unwrap();
+    assert!(seeded_lineage.iter().any(|i| i.id() == copied_test), "seeded lineage lists the copied survey");
+    // the 3 most recent events are copied (the same-day fillers outrank the first one)
+    let copied_events = seeded_lineage
+        .iter()
+        .filter(|i| serde_json::to_value(i).unwrap()["type"] == "event")
+        .count();
+    assert_eq!(copied_events, n_e, "seeded lineage lists every copied event");
+    assert!(copied_events >= 1);
+    let copied_answers = mem.test_answers(&copied_test).await.unwrap().expect("copied test exists");
+    assert_eq!(copied_answers.len(), answers.len(), "every answer is re-keyed onto the seeded personas");
+    assert!((copied_answers[0].p_yes - 0.72).abs() < 1e-9);
+    let again = mem.seed_workspace(&seeded_ws, &ws, &pop, 3).await.unwrap();
+    assert_eq!(again, (0, 0), "seeding is idempotent");
+    mem.run(&[
+        (
+            "MATCH (p:Population {key: $pop}) \
+             OPTIONAL MATCH (a:Persona)-[:MEMBER_OF]->(p) \
+             OPTIONAL MATCH (t:Test)-[:RAN_ON]->(p) \
+             DETACH DELETE a, t, p",
+            serde_json::json!({"pop": seeded_pop}),
+        ),
+        ("MATCH (e:Event)-[:HAPPENED_IN]->(c:City {key: $city}) DETACH DELETE e, c", serde_json::json!({"city": seeded_city})),
+    ])
+    .await
+    .unwrap();
 
     // Clean up: the graph is shared with the demo city, so remove this run's
     // population, personas, tests, stimuli and the seeded event.

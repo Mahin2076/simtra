@@ -18,10 +18,12 @@ import {
 } from "./ab-analysis.js";
 import * as api from "./api.js?v=ws-1";
 import { buildEvidenceChartModel } from "./evidence-chart.js";
-import { createPersonaChart, answerLabel } from "./persona-chart.js?v=4";
+import { createPersonaChart, answerLabel } from "./persona-chart.js?v=5";
 import { buildVerifiedDataModel, renderVerifiedData, bindVerifiedData, reduceVerifiedSelection, verifiedMapSelection } from "./verified-data.js";
 import { snapshotAudience, describeAudience, audienceHeader, audienceScope } from "./audience.js";
-import { initFeedPanel, refreshFeedPanel, lineageItems } from "./feedpanel.js?v=10";
+import { initFeedPanel, refreshFeedPanel, lineageItems } from "./feedpanel.js?v=16";
+import { initTour, startTour } from "./tour.js?v=1";
+import { isFreshWorkspace } from "./workspace.js?v=2";
 
 const $ = (id) => document.getElementById(id);
 const els = {
@@ -511,6 +513,11 @@ async function boot() {
   els.status.textContent = "waking the city…";
   if (api.isDemo) { document.body.classList.add("offline-demo"); $("demo-banner").hidden = false; }
   syncFilterButton();
+  // A brand-new workspace gets example surveys and events so it never opens empty.
+  if (isFreshWorkspace() && !api.isDemo) {
+    els.status.textContent = "loading example surveys…";
+    try { await api.seedWorkspace(); } catch (e) { console.warn("workspace seeding skipped:", e); }
+  }
 
   // Load the city catalog first (best-effort). If it fails we keep the existing
   // single-city SF behavior — the switcher just stays hidden.
@@ -528,6 +535,7 @@ async function boot() {
   }
 
   await loadCity(initial);
+  if (state.phase !== "error") initTour();
 }
 
 // Create (or re-create) the simulation for a city, point the map base/bbox at it,
@@ -593,12 +601,39 @@ async function loadCity(city, { filters = state.filters, preserveOnError = false
     hide(els.newsBubble);
     state.simId = null; state.mainBranch = null;
     map.setAgents(fallbackAgents(SIM.n));        // never leave an empty city
-    els.status.textContent = "offline preview · backend unreachable";
-    toast("Couldn't reach the backend — showing an offline preview.");
+    els.status.textContent = "backend unreachable · retrying…";
+    toast("Couldn't reach the backend — retrying every few seconds.");
     state.phase = "error";
     syncFilterButton();
+    scheduleBackendRetry(city, filters);
     return null;
   }
+}
+
+// After an outage the page keeps checking the backend and reloads the city the
+// moment it answers, instead of sitting in a dead "offline" state.
+const RETRY_EVERY_MS = 5000, RETRY_MAX = 24;
+function scheduleBackendRetry(city, filters) {
+  if (state.retryTimer) return;
+  let tries = 0;
+  const tick = async () => {
+    tries += 1;
+    try {
+      const h = await api.health();
+      if (h && h.status === "ok") {
+        clearInterval(state.retryTimer); state.retryTimer = null;
+        els.status.textContent = "backend is back · waking the city…";
+        state.phase = "booting";
+        await loadCity(city, { filters });
+        return;
+      }
+    } catch { /* still down */ }
+    if (tries >= RETRY_MAX) {
+      clearInterval(state.retryTimer); state.retryTimer = null;
+      els.status.textContent = "backend unreachable · reload to try again";
+    }
+  };
+  state.retryTimer = setInterval(tick, RETRY_EVERY_MS);
 }
 
 function setIdleStatus() {
@@ -1877,15 +1912,27 @@ function abAdvancedSection(result, segments, breakdowns) {
       aria-selected="${active}" aria-controls="ab-adv-body" tabindex="${active ? 0 : -1}"
       data-ab-view="${view}">${label}</button>`;
   }).join("");
-  return `<section class="ab-adv${abPanel.labels.a === "A" ? "" : " tone-yesno"}">
-    <div class="ab-adv-head">
-      <span class="res-why-label">advanced breakdown</span>
-      <div class="ab-views" role="tablist" aria-label="Breakdown view">${tabs}</div>
+  let open = false;
+  try { open = sessionStorage.getItem("simtra.adv.open") === "1"; } catch { /* ignore */ }
+  return `<details class="ab-adv${abPanel.labels.a === "A" ? "" : " tone-yesno"}"${open ? " open" : ""}>
+    <summary class="ab-adv-summary">
+      <span class="ab-adv-caret" aria-hidden="true"><svg viewBox="0 0 24 24" width="14" height="14"><path fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" d="M9 6l6 6-6 6"/></svg></span>
+      <span class="ab-adv-title">Advanced breakdown</span>
+      <span class="ab-adv-hint">top movers, by dimension, cross-tabs</span>
+    </summary>
+    <div class="ab-adv-inner">
+      <div class="ab-adv-head">
+        <div class="ab-views" role="tablist" aria-label="Breakdown view">${tabs}</div>
+      </div>
+      <div class="ab-adv-body" id="ab-adv-body" role="tabpanel" tabindex="0"
+        aria-labelledby="ab-tab-${abPanel.view}">${abPanelBody(result, segments, breakdowns)}</div>
     </div>
-    <div class="ab-adv-body" id="ab-adv-body" role="tabpanel" tabindex="0"
-      aria-labelledby="ab-tab-${abPanel.view}">${abPanelBody(result, segments, breakdowns)}</div>
-  </section>`;
+  </details>`;
 }
+// remember the disclosure for the session (re-renders rebuild the markup)
+els.resultCard.addEventListener("toggle", (e) => {
+  if (e.target.classList?.contains("ab-adv")) { try { sessionStorage.setItem("simtra.adv.open", e.target.open ? "1" : "0"); } catch { /* ignore */ } }
+}, true);
 
 function showAbResults(result) {
   resetEvidence();
@@ -1996,11 +2043,14 @@ const typingTarget = (el) => el && (el.tagName === "INPUT" || el.tagName === "TE
 els.askSubmit.addEventListener("click", event => { event.stopPropagation(); runPrediction(els.askInput.value); });
 
 // ── events ───────────────────────────────────────────────────────────────
+// The composer is always expanded. A click anywhere in it focuses the field;
+// nothing is cleared and no result card is dismissed until a question is sent.
 els.ask.addEventListener("click", (e) => {
   if (isBusy()) { cancelPrediction(); return; }
-  if (inputOpen()) { if (!els.askExtra.contains(e.target)) els.askInput.focus(); return; }
-  openInput();
+  if (!inputOpen()) setAsk("input");
+  if (!els.askExtra.contains(e.target)) els.askInput.focus();
 });
+els.askInput.addEventListener("focus", () => { if (!isBusy() && !inputOpen()) setAsk("input"); });
 els.askModes.addEventListener("click", (e) => {
   const b = e.target.closest(".ask-mode");
   if (!b) return;
@@ -2138,14 +2188,11 @@ map.onEmptyTap = () => { if (charOpen()) { closeCharCard(); return true; } retur
 const aboutOpen = () => !els.about.classList.contains("hidden");
 function openAbout() { show(els.about); show(els.aboutScrim); }
 function closeAbout() { hide(els.about); hide(els.aboutScrim); }
+$("about-tips")?.addEventListener("click", () => { closeAbout(); startTour(); });
 els.infoBtn.addEventListener("click", openAbout);
 els.aboutClose.addEventListener("click", closeAbout);
 els.aboutScrim.addEventListener("click", closeAbout);
 
-// click outside the dock collapses an open composer
-document.addEventListener("mousedown", (e) => {
-  if (inputOpen() && !els.dock.contains(e.target)) closeInput();
-});
 
 document.addEventListener("keydown", (e) => {
   if (e.key === "Tab" && filterOpen()) {
@@ -2170,7 +2217,8 @@ document.addEventListener("keydown", (e) => {
     else if (charOpen()) closeCharCard();
     else if (isBusy()) cancelPrediction();
     else if (state.phase === "results" || !els.resultCard.classList.contains("hidden")) dismissResults();
-    else if (inputOpen()) closeInput();
+    else if (els.askInput.value) { els.askInput.value = ""; autoGrow(); els.askError.textContent = ""; }
+    else if (typingTarget(document.activeElement)) document.activeElement.blur();
     else if (map.zoomedIn) map.returnToOverview();
   } else if (e.key === "k" && (e.metaKey || e.ctrlKey)) {
     e.preventDefault();

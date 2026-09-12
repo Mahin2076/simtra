@@ -91,6 +91,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/workspace", get(workspace_info))
+        .route("/workspace/seed", post(workspace_seed))
         .route("/", get(root))
         .route("/cities", get(list_cities))
         .route("/cities/:city/parse", post(parse_question_handler))
@@ -200,6 +201,34 @@ fn workspace_of(headers: &HeaderMap) -> String {
             .get("x-simtra-workspace")
             .and_then(|v| v.to_str().ok()),
     )
+}
+
+/// Seed a brand-new workspace with example surveys and events copied from the
+/// public workspace (the sf / seed 42 / 10,000 population), so it never starts empty.
+async fn workspace_seed(State(st): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    let ws = workspace_of(&headers);
+    let Some(mem) = st.memory.as_ref() else {
+        return memory_not_configured();
+    };
+    if ws == crate::memory::PUBLIC_WORKSPACE {
+        return Json(json!({"workspace": ws, "seeded": false, "tests": 0, "events": 0})).into_response();
+    }
+    let Some(rt) = st.cities.get("sf") else {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error": "sf is not loaded"}))).into_response();
+    };
+    let pop = build_population_with(&rt.records, 10_000, 42, Some(&rt.tiles), rt.profile.clone());
+    match mem.seed_workspace(&ws, crate::memory::PUBLIC_WORKSPACE, &pop, 3).await {
+        Ok((tests, events)) => {
+            if tests + events > 0 {
+                tracing::info!("persona memory: seeded workspace {ws} with {tests} surveys and {events} events");
+            }
+            Json(json!({"workspace": ws, "seeded": tests + events > 0, "tests": tests, "events": events})).into_response()
+        }
+        Err(e) => {
+            tracing::warn!("persona memory: seeding {ws} failed: {e:#}");
+            (StatusCode::BAD_GATEWAY, Json(json!({"error": "workspace seeding failed"}))).into_response()
+        }
+    }
 }
 
 /// What the current workspace remembers, for the UI.

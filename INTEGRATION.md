@@ -425,11 +425,23 @@ X-Simtra-Workspace: <id>      # [A-Za-z0-9_-]{1,32}
 
 A missing or invalid header means workspace `public`, which holds everything written
 before workspaces existed. `?ws=<id>` in the page URL adopts that workspace (and stores
-it), so a workspace can be shared by link; the timeline header has *share* / *new*.
+it), so a workspace can be shared by link; the timeline's ··· menu has *Share timeline link* / *Start a new workspace*.
 Simulations and populations are deterministic and shared across workspaces; only the
 memory graph is partitioned (City nodes are keyed `"{ws}:{slug}"`, populations
 `"{ws}:{city}:{seed}:{n}"`). The frontend also sends `ngrok-skip-browser-warning: 1`
 so a tunnelled backend answers JSON instead of the ngrok interstitial.
+
+`POST /workspace/seed` → fill a brand-new workspace with examples so it never opens
+empty: the 3 most recent public surveys (polls with stored breakdowns, answers re-keyed
+onto the workspace's own `sf` / seed 42 / 10,000 personas, personal answers included)
+and the 3 most recent public news events with their reactions. Copied nodes get new
+ids and `seeded: true` but keep their original dates. No-op for `public` and once the
+workspace has any survey or event. The frontend calls it once, right after it mints a
+new workspace id.
+
+```json
+{"workspace":"a1b2c3d4e5f6","seeded":true,"tests":3,"events":3}
+```
 
 `GET /workspace` → what the current workspace remembers:
 

@@ -4,7 +4,7 @@
 // ─────────────────────────────────────────────────────────────────────────
 
 import { BASE, SIM, PREDICT } from "./config.js";
-import { workspaceHeaders } from "./workspace.js?v=1";
+import { workspaceHeaders } from "./workspace.js?v=2";
 
 async function req(path, { method = "GET", body, timeout = 30000, signal } = {}) {
   if (isDemo && path === "/data-query") return {
@@ -51,6 +51,7 @@ export const dataQuery = (city, question, signal, { record = true } = {}) =>
   req("/data-query", { method:"POST", body:{city, question, ...(record ? {} : { record: false })}, signal, timeout:60000 });
 
 export const health = () => req("/health", { timeout: 8000 });
+export const seedWorkspace = () => req("/workspace/seed", { method: "POST", body: {}, timeout: 90000 });
 
 // Persisted prediction history from InsForge. The Rust backend keeps the
 // InsForge admin key server-side and returns only stored result data here.

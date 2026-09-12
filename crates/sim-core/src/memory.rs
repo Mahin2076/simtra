@@ -466,6 +466,12 @@ pub fn now_iso() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
+/// Id of a node copied into a workspace by seeding: stable for (source, workspace),
+/// so re-seeding never duplicates and two workspaces never collide.
+pub fn seeded_id(prefix: &str, source_id: &str, workspace: &str) -> String {
+    short_id(prefix, &["seed", source_id, workspace])
+}
+
 fn short_id(prefix: &str, parts: &[&str]) -> String {
     let mut h = Sha256::new();
     for p in parts {
@@ -1337,6 +1343,100 @@ impl MemoryClient {
         Ok((n(0), n(1), n(2)))
     }
 
+    /// Give a fresh workspace something to look at: copy the `take` most recent polls
+    /// (with stored breakdowns) and news events from `from_workspace`, re-keying every
+    /// ANSWERED / REACTED_TO edge onto the workspace's own personas by agent id.
+    /// No-op for the public workspace or once the workspace has any test or event.
+    /// Returns (tests copied, events copied).
+    pub async fn seed_workspace(
+        &self,
+        workspace: &str,
+        from_workspace: &str,
+        pop: &Population,
+        take: usize,
+    ) -> Result<(usize, usize)> {
+        if workspace == PUBLIC_WORKSPACE || workspace == from_workspace {
+            return Ok((0, 0));
+        }
+        let (events, tests, _) = self.workspace_summary(workspace).await?;
+        if events > 0 || tests > 0 {
+            return Ok((0, 0));
+        }
+        self.ensure_population(workspace, pop).await?;
+        let slug = pop.profile.slug.clone();
+        let src_pop = population_key_in(from_workspace, pop);
+        let new_pop = population_key_in(workspace, pop);
+        let src_city = city_key(from_workspace, &slug);
+        let city = city_key(workspace, &slug);
+
+        let ids = |rows: &Vec<Vec<Value>>| -> Vec<String> {
+            rows.iter().filter_map(|r| r.first().and_then(|v| v.as_str()).map(String::from)).collect()
+        };
+        let picked = self
+            .run(&[
+                (
+                    "MATCH (t:Test)-[:RAN_ON]->(p:Population {key: $src}) \
+                     WHERE t.kind = 'poll' AND t.breakdowns_json IS NOT NULL \
+                     RETURN t.id ORDER BY t.created_at DESC LIMIT $take",
+                    json!({"src": src_pop, "take": take as i64}),
+                ),
+                (
+                    "MATCH (e:Event)-[:HAPPENED_IN]->(c:City {key: $src}) \
+                     WHERE coalesce(e.kind, 'news') = 'news' \
+                     RETURN e.id ORDER BY e.created_at DESC LIMIT $take",
+                    json!({"src": src_city, "take": take as i64}),
+                ),
+            ])
+            .await?;
+        let test_ids = picked.first().map(ids).unwrap_or_default();
+        let event_ids = picked.get(1).map(ids).unwrap_or_default();
+
+        let mut n_tests = 0;
+        for src in &test_ids {
+            let new_id = seeded_id("test", src, workspace);
+            self.run(&[(
+                "MATCH (t:Test {id: $src}) MATCH (np:Population {key: $newpop}) \
+                 MERGE (nt:Test {id: $new}) \
+                 ON CREATE SET nt = t {.*, id: $new, seeded: true, simulation_id: 'seed', branch_id: 'seed'} \
+                 MERGE (nt)-[:RAN_ON]->(np)",
+                json!({"src": src, "new": new_id, "newpop": new_pop}),
+            )])
+            .await?;
+            self.run(&[(
+                "MATCH (a:Persona)-[x:ANSWERED]->(t:Test {id: $src}) \
+                 MATCH (nt:Test {id: $new}) \
+                 MATCH (na:Persona) WHERE na.key = $newpop + ':' + toString(a.agent_id) \
+                 MERGE (na)-[nx:ANSWERED]->(nt) ON CREATE SET nx = properties(x)",
+                json!({"src": src, "new": new_id, "newpop": new_pop}),
+            )])
+            .await?;
+            n_tests += 1;
+        }
+        let mut n_events = 0;
+        for src in &event_ids {
+            let new_id = seeded_id("evt", src, workspace);
+            self.run(&[(
+                "MATCH (e:Event {id: $src}) \
+                 MERGE (c:City {key: $city}) ON CREATE SET c.slug = $slug, c.workspace = $ws \
+                 MERGE (ne:Event {id: $new}) \
+                 ON CREATE SET ne = e {.*, id: $new, seeded: true} \
+                 MERGE (ne)-[:HAPPENED_IN]->(c)",
+                json!({"src": src, "new": new_id, "city": city, "slug": slug, "ws": workspace}),
+            )])
+            .await?;
+            self.run(&[(
+                "MATCH (a:Persona)-[r:REACTED_TO]->(e:Event {id: $src}) \
+                 MATCH (ne:Event {id: $new}) \
+                 MATCH (na:Persona) WHERE na.key = $newpop + ':' + toString(a.agent_id) \
+                 MERGE (na)-[nr:REACTED_TO]->(ne) ON CREATE SET nr = properties(r)",
+                json!({"src": src, "new": new_id, "newpop": new_pop}),
+            )])
+            .await?;
+            n_events += 1;
+        }
+        Ok((n_tests, n_events))
+    }
+
     /// Store residents' reactions to an event. Re-reacting overwrites the old reaction.
     pub async fn record_reactions(
         &self,
@@ -1712,5 +1812,19 @@ mod population_key_tests {
         assert!(a.starts_with("sf:42:100:f"));
         assert_ne!(a, b);
         assert_eq!(a, population_key_of(&pop(r#"{"sex":"female"}"#)));
+    }
+}
+
+#[cfg(test)]
+mod seeded_id_tests {
+    use super::seeded_id;
+    #[test]
+    fn seeded_ids_are_stable_and_workspace_specific() {
+        let a = seeded_id("test", "test-abc", "ws1");
+        assert_eq!(a, seeded_id("test", "test-abc", "ws1"));
+        assert!(a.starts_with("test-"));
+        assert_ne!(a, seeded_id("test", "test-abc", "ws2"));
+        assert_ne!(a, seeded_id("test", "test-abd", "ws1"));
+        assert_ne!(seeded_id("evt", "x", "ws1"), seeded_id("test", "x", "ws1"));
     }
 }

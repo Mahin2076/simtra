@@ -21,17 +21,21 @@ function write(id) {
   try { localStorage.setItem(KEY, id); } catch { /* private mode: session-only id */ }
 }
 
+let created = false;
 function resolve() {
   const fromUrl = (new URLSearchParams(globalThis.location?.search ?? "").get("ws") || "").trim();
-  if (VALID.test(fromUrl)) { write(fromUrl); return fromUrl; }
+  if (VALID.test(fromUrl)) { if (fromUrl !== read()) created = true; write(fromUrl); return fromUrl; }
   const stored = read();
   if (VALID.test(stored)) return stored;
   const id = freshId();
   write(id);
+  created = true;
   return id;
 }
 
 export const WORKSPACE = resolve();
+/** True when this page load minted (or first adopted) the workspace id: seed it. */
+export const isFreshWorkspace = () => created;
 
 /** Headers to attach to every backend request. The ngrok header skips the free-tier
  *  browser interstitial when the backend is tunnelled; other hosts ignore it. */
