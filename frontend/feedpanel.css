@@ -304,3 +304,13 @@
 .fp-chart .pc { margin-top: var(--s-3); padding-top: var(--s-3); }
 .fp-title-link { cursor: pointer; }
 .fp-title-link:hover, .fp-title-link:focus-visible { color: var(--accent); outline: none; }
+
+/* ── workspace line: who sees this memory ── */
+.fp-workspace { display: flex; align-items: center; gap: 6px; padding: 2px var(--s-4) 0; font-size: var(--fs-caption2); color: var(--ink-3); }
+.fp-ws-label { text-transform: uppercase; letter-spacing: var(--tr-label); font-weight: var(--fw-semi); }
+.fp-ws-id { font-family: var(--font); font-size: var(--fs-caption2); color: var(--ink-2); background: var(--fill); padding: 1px 6px; border-radius: var(--r-full); }
+.fp-ws-link { border: 0; background: none; padding: 0; color: var(--accent); font: inherit; font-size: var(--fs-caption2); cursor: pointer; }
+.fp-ws-link:hover { text-decoration: underline; }
+.fp-ws-sep { color: var(--sep); }
+.fp-ws-confirm { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); margin: var(--s-2) var(--s-4) 0; padding: var(--s-3); border-radius: var(--r-md); background: var(--fill); font-size: var(--fs-footnote); color: var(--ink-2); }
+.fp-ws-confirm .fp-primary { padding: 6px 12px; font-size: var(--fs-caption); }

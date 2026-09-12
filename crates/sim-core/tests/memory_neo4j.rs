@@ -28,9 +28,13 @@ async fn neo4j_memory_roundtrip() {
     let n = 30usize;
     let records = simfrancisco::pums::load_sf().unwrap();
     let pop = simfrancisco::persona::build_population(&records, n, seed, None);
-    let pop_key = memory::population_key(&pop.profile.slug, pop.seed, pop.n);
-    assert_eq!(pop_key, format!("sf:{seed}:{n}"));
-    mem.ensure_population(&pop).await.unwrap();
+    // Throwaway workspace: everything this run writes is scoped to it.
+    let ws = format!("test-{seed}");
+    let city = memory::city_key(&ws, &pop.profile.slug);
+    assert_eq!(city, format!("test-{seed}:sf"));
+    let pop_key = memory::population_key_in(&ws, &pop);
+    assert_eq!(pop_key, format!("test-{seed}:sf:{seed}:{n}"));
+    mem.ensure_population(&ws, &pop).await.unwrap();
 
     // city-wide event: every persona in sf remembers it
     // A crashed earlier run can leave same-day filler events behind; they would push
@@ -42,7 +46,7 @@ async fn neo4j_memory_roundtrip() {
     .await
     .unwrap();
     let ev = mem
-        .add_city_event("sf", "news", EVENT_TEXT, "2026-09-10")
+        .add_city_event(&city, "news", EVENT_TEXT, "2026-09-10")
         .await
         .unwrap();
     // Recall as of the event's own date: the city graph is shared and may hold many
@@ -58,7 +62,7 @@ async fn neo4j_memory_roundtrip() {
     let mut same_day = Vec::new();
     for i in 0..(memory::RECALL_EVENTS + 2) {
         let e = mem
-            .add_city_event("sf", "news", &format!("Same-day filler event {i} for {seed}"), "2026-09-10")
+            .add_city_event(&city, "news", &format!("Same-day filler event {i} for {seed}"), "2026-09-10")
             .await
             .unwrap();
         same_day.push(e.id);
@@ -185,8 +189,19 @@ async fn neo4j_memory_roundtrip() {
     assert_eq!(mine["under_event"], EVENT_TEXT);
     assert_eq!(mine["stimuli"].as_array().unwrap().len(), 2);
 
-    let events = mem.list_city_events("sf", 100).await.unwrap();
+    let events = mem.list_city_events(&city, 100).await.unwrap();
     assert!(events.iter().any(|e| e.event.id == ev.id));
+
+    // Workspace isolation: another workspace (and the public one) sees none of it.
+    let other = memory::city_key(&format!("other-{seed}"), "sf");
+    let elsewhere = mem.list_city_events(&other, 100).await.unwrap();
+    assert!(elsewhere.is_empty(), "other workspace must be empty");
+    let public = mem.list_city_events("sf", 200).await.unwrap();
+    assert!(!public.iter().any(|e| e.event.id == ev.id), "public must not see the workspace event");
+    let lineage = mem.lineage(&city, 100).await.unwrap();
+    assert!(lineage.iter().any(|i| i.id() == record.id), "lineage lists the workspace test");
+    let (n_events, n_tests, _) = mem.workspace_summary(&ws).await.unwrap();
+    assert!(n_events >= 1 && n_tests >= 1, "workspace summary counts this run");
 
     // Clean up: the graph is shared with the demo city, so remove this run's
     // population, personas, tests, stimuli and the seeded event.
@@ -201,6 +216,7 @@ async fn neo4j_memory_roundtrip() {
         ),
         ("MATCH (e:Event {id: $id}) DETACH DELETE e", serde_json::json!({"id": ev.id})),
         ("MATCH (e:Event) WHERE e.id IN $ids DETACH DELETE e", serde_json::json!({"ids": same_day})),
+        ("MATCH (c:City {key: $city}) DETACH DELETE c", serde_json::json!({"city": city})),
     ])
     .await
     .unwrap();

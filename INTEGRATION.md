@@ -411,3 +411,28 @@ answers with the resident list it already holds:
   `segments`.
 - `POST /data-query` accepts an extra `"record": false` field for lookups made only as tooltip
   source backing; such queries are answered but never recorded in the lineage.
+
+
+## Workspaces (per-browser memory)
+
+Memory (events, reactions, asks and their answers, personal answers, data queries) is
+scoped to a **workspace**. There are no accounts: the browser makes an id on first
+visit (`localStorage` key `simtra.workspace`) and sends it on every request as
+
+```
+X-Simtra-Workspace: <id>      # [A-Za-z0-9_-]{1,32}
+```
+
+A missing or invalid header means workspace `public`, which holds everything written
+before workspaces existed. `?ws=<id>` in the page URL adopts that workspace (and stores
+it), so a workspace can be shared by link; the timeline header has *share* / *new*.
+Simulations and populations are deterministic and shared across workspaces; only the
+memory graph is partitioned (City nodes are keyed `"{ws}:{slug}"`, populations
+`"{ws}:{city}:{seed}:{n}"`). The frontend also sends `ngrok-skip-browser-warning: 1`
+so a tunnelled backend answers JSON instead of the ngrok interstitial.
+
+`GET /workspace` → what the current workspace remembers:
+
+```json
+{"workspace":"a1b2c3d4e5f6","memory_configured":true,"events":3,"tests":2,"data_queries":0}
+```

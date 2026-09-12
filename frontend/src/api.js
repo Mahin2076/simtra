@@ -4,6 +4,7 @@
 // ─────────────────────────────────────────────────────────────────────────
 
 import { BASE, SIM, PREDICT } from "./config.js";
+import { workspaceHeaders } from "./workspace.js?v=1";
 
 async function req(path, { method = "GET", body, timeout = 30000, signal } = {}) {
   if (isDemo && path === "/data-query") return {
@@ -22,7 +23,7 @@ async function req(path, { method = "GET", body, timeout = 30000, signal } = {})
   try {
     const res = await fetch(`${BASE}${path}`, {
       method,
-      headers: body ? { "content-type": "application/json" } : undefined,
+      headers: { ...workspaceHeaders(), ...(body ? { "content-type": "application/json" } : {}) },
       body: body ? JSON.stringify(body) : undefined,
       signal: ctrl.signal,
     });
