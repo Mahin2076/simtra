@@ -8,6 +8,18 @@ use std::collections::HashMap;
 
 const EVENT_TEXT: &str = "A political figure was shot at a rally.";
 
+/// Personas registered under a population key (shared across workspaces).
+async fn persona_count(mem: &MemoryClient, pop_key: &str) -> u64 {
+    mem.run(&[(
+        "MATCH (a:Persona) WHERE a.key STARTS WITH $k + ':' RETURN count(a)",
+        serde_json::json!({"k": pop_key}),
+    )])
+    .await
+    .unwrap()[0][0][0]
+        .as_u64()
+        .unwrap()
+}
+
 #[tokio::test]
 async fn neo4j_memory_roundtrip() {
     let ws_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -32,9 +44,11 @@ async fn neo4j_memory_roundtrip() {
     let ws = format!("test-{seed}");
     let city = memory::city_key(&ws, &pop.profile.slug);
     assert_eq!(city, format!("test-{seed}:sf"));
+    // Personas are shared across workspaces: the population key carries no workspace.
     let pop_key = memory::population_key_in(&ws, &pop);
-    assert_eq!(pop_key, format!("test-{seed}:sf:{seed}:{n}"));
+    assert_eq!(pop_key, format!("sf:{seed}:{n}"));
     mem.ensure_population(&ws, &pop).await.unwrap();
+    assert_eq!(persona_count(&mem, &pop_key).await, n as u64);
 
     // city-wide event: every persona in sf remembers it
     // A crashed earlier run can leave same-day filler events behind; they would push
@@ -51,7 +65,7 @@ async fn neo4j_memory_roundtrip() {
         .unwrap();
     // Recall as of the event's own date: the city graph is shared and may hold many
     // newer events, and recall keeps only the RECALL_EVENTS most recent ones.
-    let recalled = mem.recall(&pop_key, &[0, 1, 2], "2026-09-10").await.unwrap();
+    let recalled = mem.recall(&ws, "sf", &pop_key, &[0, 1, 2], "2026-09-10").await.unwrap();
     for id in [0u32, 1, 2] {
         let m = recalled.get(&id).unwrap_or_else(|| panic!("persona {id} has no memory"));
         assert!(m.events.iter().any(|e| e.id == ev.id), "persona {id} missing city event");
@@ -70,14 +84,23 @@ async fn neo4j_memory_roundtrip() {
         same_day.push(e.id);
     }
     let newest = same_day.last().unwrap().clone();
-    let again = mem.recall(&pop_key, &[0], "2026-09-10").await.unwrap();
+    let again = mem.recall(&ws, "sf", &pop_key, &[0], "2026-09-10").await.unwrap();
     assert!(
         again[&0].events.iter().any(|e| e.id == newest),
         "newest same-day event must survive the recall cap"
     );
 
     // dated before the event: not recalled (backtests stay leakage-free)
-    let before = mem.recall(&pop_key, &[0, 1, 2], "2026-09-01").await.unwrap();
+    let before = mem.recall(&ws, "sf", &pop_key, &[0, 1, 2], "2026-09-01").await.unwrap();
+    // Another workspace shares these very personas but must not see this event.
+    let other_ws = format!("other-{seed}");
+    let elsewhere = mem.recall(&other_ws, "sf", &pop_key, &[0, 1, 2], "2026-09-12").await.unwrap();
+    for id in [0u32, 1, 2] {
+        assert!(
+            elsewhere.get(&id).map(|m| m.events.is_empty()).unwrap_or(true),
+            "workspace {other_ws} must not recall workspace {ws}'s event"
+        );
+    }
     for id in [0u32, 1, 2] {
         let none = before.get(&id).map(|m| !m.events.iter().any(|e| e.id == ev.id)).unwrap_or(true);
         assert!(none, "persona {id} recalled a future event");
@@ -114,8 +137,10 @@ async fn neo4j_memory_roundtrip() {
         hydra: HydraEvidence::default(),
             memory_test_id: None,
     };
-    let tag = TestTag::kind("poll").on_branch("sim-test", "sim-test:main");
-    let record = memory::test_record(&pop_key, &poll, &result, &tag);
+    let tag = TestTag::kind("poll").on_branch("sim-test", "sim-test:main").in_workspace(&ws);
+    let record = memory::test_record(&pop_key, "sf", &poll, &result, &tag);
+    assert_eq!(record.workspace, ws);
+    assert_eq!(record.city, "sf");
     let answers: Vec<AgentAnswer> = (0..n as u32)
         .map(|id| AgentAnswer {
             agent_id: id,
@@ -171,7 +196,10 @@ async fn neo4j_memory_roundtrip() {
     assert_eq!(a5.personal_why.as_deref(), Some("I ride Muni daily and this is my own take."));
     assert!(all.iter().find(|a| a.agent_id == 6).unwrap().personal_why.is_none());
 
-    let recalled = mem.recall(&pop_key, &[0, 5, 29], "2026-09-12").await.unwrap();
+    let recalled = mem.recall(&ws, "sf", &pop_key, &[0, 5, 29], "2026-09-12").await.unwrap();
+    // ...and the same residents, asked from another workspace, remember no tests.
+    let elsewhere = mem.recall(&other_ws, "sf", &pop_key, &[0, 5, 29], "2026-09-12").await.unwrap();
+    assert!(elsewhere.values().all(|m| m.tests.is_empty()), "tests are scoped by workspace");
     for id in [0u32, 5, 29] {
         let m = recalled.get(&id).unwrap();
         let t = m.tests.iter().find(|t| t.id == record.id).unwrap_or_else(|| panic!("persona {id} missing test"));
@@ -182,7 +210,7 @@ async fn neo4j_memory_roundtrip() {
         assert!(frag.contains("72% yes"), "{frag}");
     }
 
-    let view = mem.persona_view(&pop_key, 0).await.unwrap();
+    let view = mem.persona_view(&ws, "sf", &pop_key, 0).await.unwrap();
     assert_eq!(view["persona"]["agent_id"], 0);
     assert!(!view["events"].as_array().unwrap().is_empty());
     let tests = view["tests"].as_array().unwrap();
@@ -200,20 +228,23 @@ async fn neo4j_memory_roundtrip() {
     assert!(elsewhere.is_empty(), "other workspace must be empty");
     let public = mem.list_city_events("sf", 200).await.unwrap();
     assert!(!public.iter().any(|e| e.event.id == ev.id), "public must not see the workspace event");
-    let lineage = mem.lineage(&city, 100).await.unwrap();
+    let lineage = mem.lineage(&ws, "sf", 100).await.unwrap();
+    let other_lineage = mem.lineage(&other_ws, "sf", 100).await.unwrap();
+    assert!(!other_lineage.iter().any(|i| i.id() == record.id), "other workspace lineage must not list the test");
     assert!(lineage.iter().any(|i| i.id() == record.id), "lineage lists the workspace test");
     let (n_events, n_tests, _) = mem.workspace_summary(&ws).await.unwrap();
     assert!(n_events >= 1 && n_tests >= 1, "workspace summary counts this run");
 
     // Seeding: a fresh workspace copies this workspace's most recent survey and news
-    // event, re-keyed onto its own personas, and never does it twice.
+    // event onto the SAME shared personas (no new Persona nodes), and never does it twice.
     let seeded_ws = format!("seeded-{seed}");
+    let personas_before = persona_count(&mem, &pop_key).await;
     let (n_t, n_e) = mem.seed_workspace(&seeded_ws, &ws, &pop, 3).await.unwrap();
     assert!(n_t >= 1 && n_e >= 1, "seed copies at least one survey and one event, got {n_t}/{n_e}");
+    assert_eq!(persona_count(&mem, &pop_key).await, personas_before, "seeding must not create personas");
     let seeded_city = memory::city_key(&seeded_ws, "sf");
-    let seeded_pop = memory::population_key_in(&seeded_ws, &pop);
     let copied_test = memory::seeded_id("test", &record.id, &seeded_ws);
-    let seeded_lineage = mem.lineage(&seeded_city, 100).await.unwrap();
+    let seeded_lineage = mem.lineage(&seeded_ws, "sf", 100).await.unwrap();
     assert!(seeded_lineage.iter().any(|i| i.id() == copied_test), "seeded lineage lists the copied survey");
     // the 3 most recent events are copied (the same-day fillers outrank the first one)
     let copied_events = seeded_lineage
@@ -223,18 +254,13 @@ async fn neo4j_memory_roundtrip() {
     assert_eq!(copied_events, n_e, "seeded lineage lists every copied event");
     assert!(copied_events >= 1);
     let copied_answers = mem.test_answers(&copied_test).await.unwrap().expect("copied test exists");
-    assert_eq!(copied_answers.len(), answers.len(), "every answer is re-keyed onto the seeded personas");
+    assert_eq!(copied_answers.len(), answers.len(), "every answer is attached to the shared personas");
     assert!((copied_answers[0].p_yes - 0.72).abs() < 1e-9);
     let again = mem.seed_workspace(&seeded_ws, &ws, &pop, 3).await.unwrap();
     assert_eq!(again, (0, 0), "seeding is idempotent");
+    // Seeded workspace cleanup: only its tests, events and city (personas are shared).
     mem.run(&[
-        (
-            "MATCH (p:Population {key: $pop}) \
-             OPTIONAL MATCH (a:Persona)-[:MEMBER_OF]->(p) \
-             OPTIONAL MATCH (t:Test)-[:RAN_ON]->(p) \
-             DETACH DELETE a, t, p",
-            serde_json::json!({"pop": seeded_pop}),
-        ),
+        ("MATCH (t:Test {workspace: $ws}) DETACH DELETE t", serde_json::json!({"ws": seeded_ws})),
         ("MATCH (e:Event)-[:HAPPENED_IN]->(c:City {key: $city}) DETACH DELETE e, c", serde_json::json!({"city": seeded_city})),
     ])
     .await
@@ -254,6 +280,8 @@ async fn neo4j_memory_roundtrip() {
         ("MATCH (e:Event {id: $id}) DETACH DELETE e", serde_json::json!({"id": ev.id})),
         ("MATCH (e:Event) WHERE e.id IN $ids DETACH DELETE e", serde_json::json!({"ids": same_day})),
         ("MATCH (c:City {key: $city}) DETACH DELETE c", serde_json::json!({"city": city})),
+        ("MATCH (t:Test {workspace: $ws}) DETACH DELETE t", serde_json::json!({"ws": ws})),
+        ("MATCH (c:City {key: $city}) DETACH DELETE c", serde_json::json!({"city": memory::city_key(&other_ws, "sf")})),
     ])
     .await
     .unwrap();

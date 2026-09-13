@@ -1957,8 +1957,7 @@ async fn city_lineage(
         return memory_not_configured();
     };
     let limit = query.limit.unwrap_or(100).clamp(1, 500);
-    let city = crate::memory::city_key(&workspace_of(&headers), &city);
-    match mem.lineage(&city, limit).await {
+    match mem.lineage(&workspace_of(&headers), &city, limit).await {
         Ok(items) => Json(json!({"items": items})).into_response(),
         Err(e) => {
             tracing::warn!("persona memory: lineage failed: {e:#}");
@@ -2271,7 +2270,10 @@ async fn test_personal_answers(
             "options" => Framing::Options,
             _ => Framing::Vote,
         };
-        let fragments: HashMap<u32, String> = match mem.recall(&pop_key, &missing, &as_of_date).await {
+        let fragments: HashMap<u32, String> = match mem
+            .recall(&workspace_of(&headers), &ctx.city.profile.slug, &pop_key, &missing, &as_of_date)
+            .await
+        {
             Ok(recalled) => recalled
                 .into_iter()
                 .map(|(id, m)| (id, crate::memory::prompt_fragment(&m)))
@@ -2341,7 +2343,10 @@ async fn agent_memory(
         return memory_not_configured();
     };
     let pop_key = crate::memory::population_key_in(&workspace_of(&headers), &ctx.population);
-    match mem.persona_view(&pop_key, id).await {
+    match mem
+        .persona_view(&workspace_of(&headers), &ctx.city.profile.slug, &pop_key, id)
+        .await
+    {
         Ok(view) => Json(view).into_response(),
         Err(e) => {
             tracing::warn!("persona memory: persona view failed: {e:#}");

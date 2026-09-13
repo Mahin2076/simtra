@@ -413,7 +413,9 @@ answers with the resident list it already holds:
   source backing; such queries are answered but never recorded in the lineage.
 
 
-## Workspaces (per-browser memory)
+## Workspaces
+
+Residents (Persona/Population nodes) are shared by every workspace; only what a workspace posts and asks is private (`Test.workspace`, `Event.workspace`, and a per-workspace City node). A fresh workspace is seeded with a curated set of surveys and events copied from `public` onto the same residents. (per-browser memory)
 
 Memory (events, reactions, asks and their answers, personal answers, data queries) is
 scoped to a **workspace**. There are no accounts: the browser makes an id on first
