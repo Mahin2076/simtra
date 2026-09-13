@@ -465,7 +465,10 @@ p_yes is a probability between 0 and 1. Be realistic and calibrated to {city_nam
         }
         let memory_by_rep: HashMap<usize, String> = if let Some(mem) = &self.memory {
             let rep_ids: Vec<u32> = clusters.iter().map(|c| pop.agents[c.rep_idx].id).collect();
-            match mem.recall(&pop_key, &rep_ids, &poll.as_of_date).await {
+            match mem
+                .recall(&tag.workspace(), &pop.profile.slug, &pop_key, &rep_ids, &poll.as_of_date)
+                .await
+            {
                 Ok(recalled) => clusters
                     .iter()
                     .filter_map(|c| {
@@ -899,7 +902,7 @@ p_yes is a probability between 0 and 1. Be realistic and calibrated to {city_nam
     ) {
         let Some(mem) = self.memory.clone() else { return };
         let cutoffs = pop.income_cutoffs;
-        let record = memory::test_record(pop_key, poll, result, tag);
+        let record = memory::test_record(pop_key, &pop.profile.slug, poll, result, tag);
         result.memory_test_id = Some(record.id.clone());
         let mut answers: Vec<AgentAnswer> = Vec::with_capacity(pop.agents.len());
         for (ci, c) in clusters.iter().enumerate() {
@@ -921,14 +924,15 @@ p_yes is a probability between 0 and 1. Be realistic and calibrated to {city_nam
             }
         }
         let pop_key = pop_key.to_string();
-        let city = memory::city_key(&tag.workspace(), &pop.profile.slug);
+        let workspace = tag.workspace();
+        let city = memory::city_key(&workspace, &pop.profile.slug);
         let stimulus = poll.event.clone();
         let stimuli = tag.stimuli.clone();
         tokio::spawn(async move {
             let ids: Vec<u32> = answers.iter().map(|a| a.agent_id).collect();
             let under_event = match &stimulus {
                 Some(ev) => match mem
-                    .add_stimulus_event(&pop_key, &city, &ev.text, &ev.as_of_date, &ids)
+                    .add_stimulus_event(&workspace, &pop_key, &city, &ev.text, &ev.as_of_date, &ids)
                     .await
                 {
                     Ok(e) => Some(e.id),

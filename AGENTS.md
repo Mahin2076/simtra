@@ -105,7 +105,7 @@ Graph shape:
 ```text
 (:City {key, slug, workspace})   key = slug for the public workspace, "{ws}:{slug}" otherwise
 (:Population {key, city, seed, n})-[:IN_CITY]->(:City)
-(:Persona {key, agent_id, name, ...})-[:MEMBER_OF]->(:Population)
+(:Persona {key, agent_id, name, ...})-[:MEMBER_OF]->(:Population)   shared by every workspace; Test.workspace / Event.workspace scope memory
 (:Event {id, kind, text, as_of_date})-[:HAPPENED_IN]->(:City)     city-wide news
 (:Persona)-[:EXPOSED_TO {at}]->(:Event)                            targeted exposure / stimulus
 (:Test {id, kind, question, framing, as_of_date, model, p_yes, ...})-[:RAN_ON]->(:Population)
