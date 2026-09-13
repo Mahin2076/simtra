@@ -21,7 +21,7 @@ import { buildEvidenceChartModel } from "./evidence-chart.js";
 import { createPersonaChart, answerLabel } from "./persona-chart.js?v=5";
 import { buildVerifiedDataModel, renderVerifiedData, bindVerifiedData, reduceVerifiedSelection, verifiedMapSelection } from "./verified-data.js";
 import { snapshotAudience, describeAudience, audienceHeader, audienceScope } from "./audience.js";
-import { initFeedPanel, refreshFeedPanel, lineageItems } from "./feedpanel.js?v=16";
+import { initFeedPanel, refreshFeedPanel, lineageItems } from "./feedpanel.js?v=18";
 import { initTour, startTour } from "./tour.js?v=1";
 import { isFreshWorkspace } from "./workspace.js?v=2";
 
@@ -365,7 +365,7 @@ function attachEvidence(result, ab = false) {
   if (testId) {
     fetchAnswers(testId).then((answers) => {
       if (seq !== chart.seq || !chart.inst) return;
-      const samePopulation = !result.past || result.past.population_key === populationKey();
+      const samePopulation = !result.past || samePopulationAs(result.past.population_key);
       if (answers && answers.size && samePopulation) chart.inst.setAnswers(answers, "");
       else chart.inst.setAnswers(null, answers && answers.size && !samePopulation
         ? "These residents were asked in a different simulation, so this view shows group shares without per-person answers."
@@ -377,6 +377,14 @@ function populationKey() {
   const c = citySlug(); const seed = SIM.seed; const n = state.residents;
   return filterCount() ? null : `${c}:${seed}:${n}`;
 }
+// Backend population keys carry a workspace prefix outside `public`
+// ("<ws>:sf:42:10000"), so compare on the city:seed:n tail.
+function samePopulationAs(key) {
+  const mine = populationKey();
+  if (!key || !mine) return !key;
+  return key === mine || key.endsWith(":" + mine);
+}
+export { samePopulationAs };
 // Census figures back the chart only as tooltip text: one verified-data query per
 // dimension, cached per city, never used as chart data.
 const CENSUS_ALIAS = { age: "age", gender: "sex", race: "race and ethnicity", education: "education", employment: "employment", citizenship: "citizenship", nativity: "nativity", marital: "marital status", tenure: "tenure" };
@@ -510,12 +518,12 @@ async function boot() {
     getPopulationKey: populationKey,
     openPastResult,
   });
-  els.status.textContent = "waking the city…";
+  setStatusLoading("waking the city…");
   if (api.isDemo) { document.body.classList.add("offline-demo"); $("demo-banner").hidden = false; }
   syncFilterButton();
   // A brand-new workspace gets example surveys and events so it never opens empty.
   if (isFreshWorkspace() && !api.isDemo) {
-    els.status.textContent = "loading example surveys…";
+    setStatusLoading("loading example surveys…");
     try { await api.seedWorkspace(); } catch (e) { console.warn("workspace seeding skipped:", e); }
   }
 
@@ -553,7 +561,7 @@ async function loadCity(city, { filters = state.filters, preserveOnError = false
   map.setBase(maskBase);
   syncActiveTitle();
 
-  els.status.textContent = `waking ${city.display}…`;
+  setStatusLoading(`waking ${city.display}…`);
   hide(els.newsBubble);            // clear the previous city's news while loading
   state.news = [];
   state.mainBranch = null;
@@ -636,7 +644,14 @@ function scheduleBackendRetry(city, filters) {
   state.retryTimer = setInterval(tick, RETRY_EVERY_MS);
 }
 
+// status card in a loading state: spinner instead of the live dot
+function setStatusLoading(text) {
+  els.status.textContent = text;
+  els.status.classList.add("is-loading");
+}
+
 function setIdleStatus() {
+  els.status.classList.remove("is-loading");
   const n = state.residents.toLocaleString();
   const display = (state.city?.display || "san francisco").toLowerCase();
   const kd = state.city?.knowledge_date;

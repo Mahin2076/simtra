@@ -126,6 +126,7 @@ const plural = (n, w, ws = `${w}s`) => `${n} ${n === 1 ? w : ws}`;
 
 // ── state ──────────────────────────────────────────────────────────────────
 const state = {
+  loaded: false,        // first lineage fetch finished (skeleton until then)
   getCity: () => "sf",
   getBranch: () => null,
   getCityDisplay: () => "San Francisco",
@@ -382,6 +383,7 @@ export async function refreshFeedPanel({ quiet = false } = {}) {
     state.memoryOff = false;
     if (state.chart && !items.some((i) => i.id === state.chart.id)) closeChart();
     state.items = items;
+    state.loaded = true;
     notice("");
     renderThread();
     syncHeader();
@@ -391,6 +393,7 @@ export async function refreshFeedPanel({ quiet = false } = {}) {
     if (e.status === 503) {
       state.memoryOff = true;
       state.items = [];
+      state.loaded = true;
       renderThread();
       notice("Persona memory is not configured on this backend, so residents cannot remember or react.");
     } else if (!quiet) {
@@ -443,6 +446,7 @@ function syncHeader() {
     status = `${parts.join(" · ")} in memory · ${status}`;
   }
   el.status.textContent = status;
+  el.status.classList.toggle("is-loading", /…$/.test(status) || (!state.loaded && !state.memoryOff));
   const canWrite = !!branch && !state.memoryOff;
   for (const f of [el.formPost]) {
     const btn = f.querySelector(".fp-primary");
@@ -556,6 +560,16 @@ function renderThread() {
   // the city's baseline headlines: what residents already know, as plain posts
   const news = state.view === "all" || state.view === "news" ? (state.getNews() || []) : [];
   for (const a of news.slice(0, 6)) frag.appendChild(newsPost(a));
+  const stillWaking = !state.getBranch() && !state.memoryOff;
+  if (!frag.childElementCount && (!state.loaded || stillWaking) && !state.memoryOff) {
+    // still fetching (or seeding a fresh workspace): skeleton rows, not an empty state
+    const sk = document.createElement("div");
+    sk.className = "fp-skeleton";
+    sk.setAttribute("aria-label", "Loading the timeline");
+    sk.innerHTML = `<div class="fp-skel-note"><span class="fp-spinner" aria-hidden="true"></span>${state.getBranch() ? "loading the timeline…" : "waking the residents…"}</div>` +
+      Array.from({ length: 3 }, () => `<div class="fp-skel-row"><span class="fp-skel-dot"></span><div><div class="fp-skel-line w40"></div><div class="fp-skel-line w90"></div><div class="fp-skel-line w70"></div></div></div>`).join("");
+    frag.appendChild(sk);
+  }
   if (!frag.childElementCount) {
     const empty = document.createElement("div");
     empty.className = "fp-empty";
@@ -902,7 +916,8 @@ function mountEvidenceChart(item, host) {
   const chartRef = state.chart;
   state.fetchAnswers(item.id).then((answers) => {
     if (state.chart !== chartRef) return;
-    const same = !item.population_key || item.population_key === state.getPopulationKey();
+    const mine = state.getPopulationKey();
+    const same = !item.population_key || !mine || item.population_key === mine || item.population_key.endsWith(":" + mine);
     if (answers && answers.size && same) inst.setAnswers(answers, "");
     else inst.setAnswers(null, answers && answers.size && !same
       ? "These residents were asked in a different simulation, so this view shows group shares without per-person answers."

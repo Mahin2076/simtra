@@ -335,3 +335,17 @@
 .fp-ws-sep { color: var(--sep); }
 .fp-ws-confirm { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); margin: var(--s-2) var(--s-4) 0; padding: var(--s-3); border-radius: var(--r-md); background: var(--fill); font-size: var(--fs-footnote); color: var(--ink-2); }
 .fp-ws-confirm .fp-primary { padding: 6px 12px; font-size: var(--fs-caption); }
+
+/* loading: a small spinner next to the status line, skeleton rows in the thread */
+.fp-spinner { display: inline-block; width: 12px; height: 12px; margin-right: 6px; vertical-align: -2px; border-radius: 50%; border: 2px solid var(--sep); border-top-color: var(--accent); animation: fp-spin .8s linear infinite; }
+.fp-status.is-loading::before { content: ""; display: inline-block; width: 10px; height: 10px; margin-right: 6px; vertical-align: -1px; border-radius: 50%; border: 2px solid var(--sep); border-top-color: var(--accent); animation: fp-spin .8s linear infinite; }
+.fp-skeleton { padding: var(--s-3) var(--s-5) var(--s-5); }
+.fp-skel-note { font-size: var(--fs-footnote); color: var(--ink-2); margin-bottom: var(--s-3); }
+.fp-skel-row { display: flex; gap: var(--s-3); padding: var(--s-3) 0; border-top: var(--hair) solid var(--sep); }
+.fp-skel-row > div { flex: 1; }
+.fp-skel-dot { flex: none; width: 24px; height: 24px; border-radius: 50%; background: var(--fill); }
+.fp-skel-line { height: 10px; border-radius: 5px; background: linear-gradient(90deg, var(--fill) 25%, var(--fill-hi) 50%, var(--fill) 75%); background-size: 200% 100%; animation: fp-shimmer 1.2s ease-in-out infinite; margin: 6px 0; }
+.fp-skel-line.w40 { width: 40%; } .fp-skel-line.w90 { width: 90%; } .fp-skel-line.w70 { width: 70%; }
+@keyframes fp-spin { to { transform: rotate(360deg); } }
+@keyframes fp-shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+@media (prefers-reduced-motion: reduce) { .fp-spinner, .fp-status.is-loading::before, .fp-skel-line { animation: none; } }
